@@ -1,0 +1,38 @@
+# A Supabase ingyenes csomagja szünetelteti a projektet, ha 7 napig nincs rajta forgalom.
+# Ez a munkafolyamat naponta egy olvasó kérést küld az adatbázisnak, így az app akkor sem
+# alszik el, ha a csapat épp nem használja. A publikus (böngészőbe szánt) kulcsot az élő
+# oldalról olvassa ki, így nincs tárolt titok, és kulcscsere után is magától működik.
+name: Supabase keep-alive
+
+on:
+  schedule:
+    - cron: "23 5 * * *"   # naponta 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  actions: write   # hogy önmagát bekapcsolva tarthassa (lásd az utolsó lépést)
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Supabase ping
+        run: |
+          set -eu
+          URL=https://dxwhgaswmktmqriewlus.supabase.co
+          KEY=$(curl -fsSL https://epitoter.github.io/ | grep -o 'sb_publishable_[A-Za-z0-9_-]*' | head -1)
+          [ -n "$KEY" ] || { echo "Nem található a publikus kulcs az élő oldalon"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+            "$URL/rest/v1/projects?select=id&limit=1" -H "apikey: $KEY" -H "Authorization: Bearer $KEY")
+          echo "REST válasz: $code"
+          # Ha nem 200 (pl. a projekt mégis szünetel), a futás hibával áll le, és erről e-mail megy.
+          [ "$code" = "200" ]
+
+      # A GitHub 60 nap commit-mentes időszak után kikapcsolja a nyilvános repók időzített
+      # munkafolyamatait; az újra-engedélyezés ezt az órát nullázza.
+      - name: Ütemezés életben tartása
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/supabase-keepalive.yml/enable"

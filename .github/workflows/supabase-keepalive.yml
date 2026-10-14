@@ -1,12 +1,16 @@
-# A Supabase ingyenes csomagja szünetelteti a projektet, ha 7 napig nincs rajta forgalom.
-# Ez a munkafolyamat naponta egy olvasó kérést küld az adatbázisnak, így az app akkor sem
-# alszik el, ha a csapat épp nem használja. A publikus (böngészőbe szánt) kulcsot az élő
-# oldalról olvassa ki, így nincs tárolt titok, és kulcscsere után is magától működik.
+# A Supabase ingyenes csomagja szünetelteti a projektet, ha 7 napig "alacsony" a forgalma.
+# 2026-10-13-án a napi egy, üres eredményű REST-ping NEM volt elég (a projektet aznap este
+# szüneteltették, és a Supabase forgalommérése a pinget nem is számolta). Ezért ez a
+# munkafolyamat kétóránként valódi adatbázis-aktivitást kelt:
+#   1) a public.ebreszto_ping() függvénnyel ír (időbélyeg-beszúrás, régi sorok törlése),
+#   2) olvas egy táblát,
+#   3) auth-kéréseket küld (ezeket a Supabase mérése bizonyítottan számolja).
+# A publikus (böngészőbe szánt) kulcsot az élő oldalról olvassa ki, így nincs tárolt titok.
 name: Supabase keep-alive
 
 on:
   schedule:
-    - cron: "23 5 * * *"   # naponta 05:23 UTC
+    - cron: "17 */2 * * *"   # kétóránként
   workflow_dispatch:
 
 permissions:
@@ -17,17 +21,25 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Supabase ping
+      - name: Supabase ébresztés
         run: |
           set -eu
           URL=https://dxwhgaswmktmqriewlus.supabase.co
           KEY=$(curl -fsSL https://epitoter.github.io/ | grep -o 'sb_publishable_[A-Za-z0-9_-]*' | head -1)
           [ -n "$KEY" ] || { echo "Nem található a publikus kulcs az élő oldalon"; exit 1; }
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
-            "$URL/rest/v1/projects?select=id&limit=1" -H "apikey: $KEY" -H "Authorization: Bearer $KEY")
-          echo "REST válasz: $code"
-          # Ha nem 200 (pl. a projekt mégis szünetel), a futás hibával áll le, és erről e-mail megy.
-          [ "$code" = "200" ]
+          hiba=0
+          kerd() {  # név, várt kód, curl-argumentumok...
+            nev=$1; vart=$2; shift 2
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$@" -H "apikey: $KEY")
+            echo "$nev: $code"
+            [ "$code" = "$vart" ] || hiba=1
+          }
+          kerd "szívverés (írás)" 200 -X POST "$URL/rest/v1/rpc/ebreszto_ping" -H "Content-Type: application/json" -d '{}'
+          kerd "olvasás"          200 "$URL/rest/v1/projects?select=id&limit=1"
+          kerd "auth 1"           200 "$URL/auth/v1/health"
+          kerd "auth 2"           200 "$URL/auth/v1/settings"
+          # Ha bármelyik nem a várt kódot adja (pl. a projekt szünetel), a futás hibával áll le -> e-mail.
+          exit $hiba
 
       # A GitHub 60 nap commit-mentes időszak után kikapcsolja a nyilvános repók időzített
       # munkafolyamatait; az újra-engedélyezés ezt az órát nullázza.
